@@ -10,10 +10,14 @@ The app itself is a tiny Go HTTP service (`/healthz`, `/hello?name=`).
 ```
 push to main ──► promote-to-stage.yml
                    ├─ creates branch promote/<short-sha> at that commit
-                   └─ opens PR  promote/<short-sha> → stage
+                   └─ opens PR  promote/<short-sha> → stage  (+ semver:* label of the source PR)
                                    │
-                                   ├─ ci.yml    (job: test)      go vet + go test
-                                   └─ sast.yml  (job: polyscan)  semgrep, gosec, gitleaks, zizmor
+                                   ├─ ci.yml          (job: test)          go vet + go test
+                                   ├─ sast.yml        (job: polyscan)      semgrep, gosec, gitleaks, zizmor
+                                   └─ label-check.yml (job: semver-label)  exactly one semver:* label
+                                   │
+                                   ▼ merge
+                                 version.yml  → tag + prerelease vX.Y.Z-rc.N
 ```
 
 - One PR per commit pushed to `main` (per push, the head commit is promoted).
@@ -21,6 +25,28 @@ push to main ──► promote-to-stage.yml
 - If `stage` doesn't exist yet, the workflow creates it from `main`.
 - Older open promote PRs are subsets of newer ones; once a newer one is merged they
   become empty and can be closed.
+
+## Versioning
+
+Versions are driven by PR labels, not commit messages:
+
+| Label | Effect on merge into `stage` |
+|---|---|
+| `semver:major` | next major RC, e.g. `v1.4.0` → `v2.0.0-rc.1` |
+| `semver:minor` | next minor RC, e.g. `v1.4.0` → `v1.5.0-rc.1` |
+| `semver:patch` | next patch RC, e.g. `v1.4.0` → `v1.4.1-rc.1` |
+| `semver:none`  | no tag |
+
+- Put the label on your PR into `main`; `promote-to-stage.yml` copies it to the
+  promotion PR. Direct pushes to `main` have no source PR — set the label on the
+  promotion PR by hand (`semver-label` check fails until you do).
+- The bump is applied to the last **final** release (`vX.Y.Z`, `v0.0.0` if none).
+  If an open RC line already targets the same or a higher version, its RC number
+  is incremented instead: `v1.5.0-rc.1` + `patch` → `v1.5.0-rc.2`, + `major` → `v2.0.0-rc.1`.
+- Each RC is published as a GitHub prerelease with generated notes. Final
+  releases (`vX.Y.Z`) are cut later, e.g. on promotion to production.
+- Logic: [`.github/scripts/next-version.sh`](.github/scripts/next-version.sh)
+  (`gh api repos/sraisl/gh-concept/tags --jq '.[].name' | .github/scripts/next-version.sh minor`).
 
 ## Setup
 
@@ -72,7 +98,7 @@ Add a `required_status_checks` rule to the ruleset (get the id via
 ```json
 { "type": "required_status_checks", "parameters": {
     "strict_required_status_checks_policy": false,
-    "required_status_checks": [ { "context": "polyscan" }, { "context": "test" } ] } }
+    "required_status_checks": [ { "context": "polyscan" }, { "context": "test" }, { "context": "semver-label" } ] } }
 ```
 
 ```sh

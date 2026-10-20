@@ -1,0 +1,52 @@
+name: version
+
+# On merge of a promotion PR into stage: derive the bump from its semver:*
+# label and publish a release-candidate tag (vX.Y.Z-rc.N) as a prerelease.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [stage]
+
+permissions: {}
+
+concurrency:
+  group: version-stage
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Create release candidate
+        env:
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          bump=$(jq -r '[.[] | select(startswith("semver:"))][0] // "semver:none" | sub("^semver:"; "")' <<<"${LABELS}")
+          if [ "${bump}" = "none" ]; then
+            echo "semver:none, no release"
+            exit 0
+          fi
+
+          next=$(gh api "repos/${REPO}/tags" --paginate --jq '.[].name' | bash .github/scripts/next-version.sh "${bump}")
+          echo "Bump ${bump} → ${next}"
+
+          gh release create "${next}" --repo "${REPO}" \
+            --target "${SHA}" \
+            --title "${next}" \
+            --generate-notes \
+            --prerelease
+          echo "### Released ${next} (${bump})" >> "${GITHUB_STEP_SUMMARY}"
