@@ -25,5 +25,7 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+      - name: Test image publication guards
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Build and test runtime container
         run: bash scripts/test-container.sh
