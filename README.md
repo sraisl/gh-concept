@@ -4,9 +4,9 @@ Demo for a **main → stage** promotion flow on GitHub Actions, gated by a SAST 
 with [`sraisl/polyscan-action`](https://github.com/sraisl/polyscan-action).
 
 The app itself is a tiny Go HTTP service (`/healthz`, `/hello?name=`).
-`stage` is a Git branch; this repository does not build release binaries or
-deploy a staging environment. A release currently contains a source tag and
-generated release notes.
+`stage` is a Git branch. CI builds and tests a container image but does not push
+it to a registry or deploy a staging environment. A release currently contains
+a source tag and generated release notes.
 
 ## Flow
 
@@ -16,8 +16,8 @@ push to main ──► promote-to-stage.yml
                    └─ opens/updates the single PR  promote/stage → stage
                       (+ highest semver:* label of the included source PRs)
                                    │
-                                   ├─ ci.yml          (job: test)          go vet + go test
-                                   ├─ sast.yml        (job: polyscan)      semgrep, gosec, gitleaks, zizmor
+                                   ├─ ci.yml          (job: test)          Go checks + container tests
+                                   ├─ sast.yml        (job: polyscan)      semgrep, gosec, gitleaks, zizmor, hadolint
                                    └─ label-check.yml (job: semver-label)  exactly one semver:* label
                                    │
                                    ▼ merge
@@ -208,5 +208,33 @@ curl http://localhost:8080/healthz
 curl 'http://localhost:8080/hello?name=stage'
 ```
 
-`PORT=9090 go run .` selects a different port. Tests currently cover the Go HTTP
-handlers; automated regression tests for the version script are still missing.
+`PORT=9090 go run .` selects a different port. Tests cover the Go HTTP handlers;
+automated regression tests for the version script are still missing.
+
+## Docker
+
+```sh
+docker build --tag gh-concept:local .
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --publish 127.0.0.1:8080:8080 gh-concept:local
+```
+
+The multi-stage Dockerfile runs `go vet` and `go test` before compiling a static
+binary. The final `scratch` image contains only that binary and runs as UID/GID
+65532. It has no shell or bundled HTTP client; use `/healthz` from outside the
+container for readiness checks. No writable filesystem or Linux capabilities
+are needed. To change the internal listening port, pass `--env PORT=9090` and
+publish `127.0.0.1:9090:9090` instead.
+
+Run the same integration checks as CI with Docker, Bash, curl and jq installed:
+
+```sh
+bash scripts/test-container.sh
+```
+
+The script builds the image, checks its non-root user, and tests health, default
+and named greetings, unsupported methods and missing routes. It runs with a
+read-only filesystem and dropped capabilities, checks both the default port and
+the `PORT` override, and removes its test containers. The local test image is
+retained. Hadolint runs as part of the existing Polyscan check; the Dockerfile
+does not disable any lint rules.

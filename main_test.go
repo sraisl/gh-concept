@@ -16,6 +16,8 @@ func TestHandlers(t *testing.T) {
 		{"/healthz", "status", "ok"},
 		{"/hello", "message", "hello, world"},
 		{"/hello?name=stage", "message", "hello, stage"},
+		{"/hello?name=", "message", "hello, world"},
+		{"/hello?name=Gr%C3%BC%C3%9Fe%20%22Docker%22", "message", "hello, Grüße \"Docker\""},
 	}
 
 	mux := newMux()
@@ -26,6 +28,9 @@ func TestHandlers(t *testing.T) {
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
 			}
 			var body map[string]string
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {

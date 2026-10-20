@@ -25,7 +25,7 @@ jobs:
           persist-credentials: false
       - uses: sraisl/polyscan-action@dc8a1ea115d2dec570301f18ec929350a5b41145 # v16.1.0
         with:
-          engines: semgrep,gosec,gitleaks,zizmor
+          engines: semgrep,gosec,gitleaks,zizmor,hadolint
           gate: "true"
           max-critical: "0"
           max-high: "0"
