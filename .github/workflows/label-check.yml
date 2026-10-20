@@ -1,12 +1,12 @@
 name: label-check
 
-# Promotion PRs into stage need exactly one semver:* label; version.yml uses
-# it to compute the release-candidate tag on merge.
+# Source PRs into main and promotion PRs into stage need exactly one supported
+# semver label; version.yml uses the promotion label to compute the RC tag.
 
 on:
   pull_request:
     types: [opened, reopened, labeled, unlabeled, synchronize]
-    branches: [stage]
+    branches: [main, stage]
 
 permissions: {}
 
