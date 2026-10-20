@@ -39,6 +39,35 @@ push to main ──► promote-to-stage.yml
   rebase would rewrite the commits, so `stage` would never contain `main`'s
   history and already promoted PRs would show up again.
 
+## Creating a release
+
+### Release candidate (automatic)
+
+1. Merge a feature/fix PR into `main` with exactly one supported semver label.
+2. Wait for the rolling promotion PR into `stage` to pass all required checks,
+   then merge it using **Create a merge commit**.
+3. Wait for the complete `version` run, including its `image` job, to succeed.
+   It prepares a draft, builds/tests/pushes the container, then publishes the RC.
+
+`semver:none` intentionally produces no RC. Do not create Git tags or releases
+using GitHub's **Draft a new release** button; the pipeline manages them.
+
+### Final release (manual approval)
+
+1. Test and accept the RC on stage.
+2. Open **Actions → final-release → Run workflow** and select branch **main**.
+3. Leave `rc_tag` empty to accept the newest eligible published RC, or enter the
+   exact tag you tested, then start the workflow.
+4. Wait for success and verify the final release and its image reference.
+
+For example, `v0.1.0-rc.7` becomes `v0.1.0`: the same Git commit and the same
+container digest, with no image rebuild. The workflow does not deploy it.
+The detailed selection and retry rules are in [Final releases](#final-releases).
+
+You do not need to create or upload `release.json`. The pipeline generates and
+attaches this verification record automatically; normal release creation only
+requires the PR merges and final approval above.
+
 ## Daily workflow
 
 CI runs `go vet`, `go test` and the SAST scan on every branch push, including
@@ -290,7 +319,13 @@ Use the digest reference from the successful run's summary to deploy exactly
 the tested bits, for example `ghcr.io/sraisl/gh-concept@sha256:<digest>`.
 New prereleases are published only after image verification and after uploading
 `release.json`. That asset records version, commit, image tag, digest, immutable
-image reference and workflow URL. Generated notes are grouped by semver labels
+image reference and workflow URL. It is an internal verification record under
+the release's **Assets**, not a file to maintain in the repository. Final
+promotion checks it against Git and GHCR to preserve the originally tested
+digest. Do not reconstruct missing records by hand for older releases; let the
+pipeline publish a new RC instead.
+
+Generated notes are grouped by semver labels
 using [`.github/release.yml`](.github/release.yml). Include migration instructions
 or known issues in the source PRs; automatic notes do not assess compatibility.
 
@@ -311,11 +346,16 @@ workflow**, choose **main**, leave `rc_tag` empty and start the run. No version
 lookup or copy/paste is needed. The workflow selects the highest Semver version
 and then the highest RC number among published prereleases with `release.json`.
 Drafts, old RCs without metadata, and version lines already finalized are skipped.
+If no candidate remains, the accepted version may already have a final release.
+For new changes, merge a new stage promotion with a release-producing semver
+label; for a retry of an existing final promotion, explicitly select its RC.
 
 The selection and links to available candidates appear in the run's job summary.
 Selection happens when the run starts; if you accepted a specific RC rather than
 whichever eligible RC is newest, enter its tag explicitly. GitHub's workflow
 input form does not populate a dynamic list of releases.
+To change the RC selected by a failed run, start a new run with the desired input;
+rerunning the old run preserves its original input.
 
 Start automatic selection from the CLI:
 
