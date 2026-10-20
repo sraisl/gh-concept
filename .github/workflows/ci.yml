@@ -2,12 +2,16 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches-ignore: [stage, promote/stage]
   pull_request:
     branches: [main, stage]
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
