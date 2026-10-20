@@ -1,5 +1,7 @@
 """Regression tests for safe retries of GHCR publication (no network required)."""
 import importlib.util
+import hashlib
+import io
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -82,6 +84,83 @@ class ImageStateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.check(**args)
                 call.assert_not_called()
+
+    def test_final_alias_keeps_rc_config_version(self):
+        with patch.object(image_state, "request", side_effect=self.replies()):
+            result = self.check(tag="v0.1.0", expected_version=TAG)
+            self.assertEqual(result["image"], "ghcr.io/sraisl/gh-concept:v0.1.0")
+
+    def test_final_alias_must_match_rc_version_line(self):
+        with patch.object(image_state, "request") as call:
+            with self.assertRaises(ValueError):
+                self.check(tag="v9.0.0", expected_version=TAG)
+            call.assert_not_called()
+
+
+class PromotionTests(unittest.TestCase):
+    @staticmethod
+    def state(tag=TAG, digest=DIGEST, exists="true"):
+        return {"image": f"ghcr.io/sraisl/gh-concept:{tag}", "digest": digest, "exists": exists}
+
+    def promote(self, digest=DIGEST):
+        return image_state.promote_image("sraisl/gh-concept", TAG, REVISION, digest, "actor", "token")
+
+    def test_existing_final_reuses_the_exact_digest_without_writes(self):
+        with patch.object(image_state, "image_state", side_effect=[self.state(), self.state("v0.1.0")]), \
+                patch.object(image_state, "urlopen") as network:
+            self.assertEqual(self.promote()["digest"], DIGEST)
+            network.assert_not_called()
+
+    def test_wrong_source_digest_cannot_be_promoted(self):
+        with patch.object(image_state, "image_state", return_value=self.state(digest="sha256:" + "d" * 64)), \
+                patch.object(image_state, "urlopen") as network:
+            with self.assertRaisesRegex(ValueError, "published release record"):
+                self.promote()
+            network.assert_not_called()
+
+    def test_missing_source_cannot_be_promoted(self):
+        with patch.object(image_state, "image_state", return_value=self.state(exists="false")), \
+                patch.object(image_state, "urlopen") as network:
+            with self.assertRaises(ValueError):
+                self.promote()
+            network.assert_not_called()
+
+    def test_existing_final_with_different_digest_cannot_be_replaced(self):
+        with patch.object(image_state, "image_state", side_effect=[
+                self.state(), self.state("v0.1.0", digest="sha256:" + "d" * 64)]), \
+                patch.object(image_state, "urlopen") as network:
+            with self.assertRaisesRegex(ValueError, "different digest"):
+                self.promote()
+            network.assert_not_called()
+
+    def test_manifest_is_copied_byte_for_byte(self):
+        raw = b'{"schemaVersion":2,"config":{"digest":"test"}}'
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        source = io.BytesIO(raw)
+        source.headers = {"Content-Type": "application/vnd.oci.image.manifest.v1+json"}
+        destination = io.BytesIO()
+        destination.status = 201
+        with patch.object(image_state, "image_state", side_effect=[
+                self.state(digest=digest), self.state("v0.1.0", exists="false"),
+                self.state("v0.1.0", digest=digest)]), \
+                patch.object(image_state, "registry_headers", return_value={"Authorization": "Bearer token"}), \
+                patch.object(image_state, "urlopen", side_effect=[source, destination]) as network:
+            self.assertEqual(self.promote(digest)["digest"], digest)
+            put = network.call_args_list[1].args[0]
+            self.assertEqual(put.get_method(), "PUT")
+            self.assertEqual(put.data, raw)
+            self.assertTrue(put.full_url.endswith("/manifests/v0.1.0"))
+
+    def test_corrupt_manifest_cannot_be_pushed(self):
+        source = io.BytesIO(b"corrupt bytes")
+        source.headers = {"Content-Type": "application/vnd.oci.image.manifest.v1+json"}
+        with patch.object(image_state, "image_state", side_effect=[
+                self.state(), self.state("v0.1.0", exists="false")]), \
+                patch.object(image_state, "registry_headers", return_value={}), \
+                patch.object(image_state, "urlopen", return_value=source) as network:
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                self.promote()
+            self.assertEqual(network.call_count, 1)
 
 
 if __name__ == "__main__":

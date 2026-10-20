@@ -1,7 +1,7 @@
 name: version
 
 # On merge of a promotion PR into stage: derive the bump from its semver:*
-# label and publish a release-candidate tag (vX.Y.Z-rc.N) as a prerelease.
+# label, prepare a draft and publish it only after the tested image is ready.
 
 on:
   pull_request:
@@ -19,57 +19,33 @@ jobs:
   tag:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
+    outputs:
+      tag: ${{ steps.rc.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           persist-credentials: false
-          sparse-checkout: .github/scripts
-      - name: Create release candidate
+          sparse-checkout: |
+            .github/scripts
+            scripts
+      - name: Prepare release candidate draft
+        id: rc
         env:
-          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
-          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.pull_request.merge_commit_sha }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: |
-          set -euo pipefail
+        run: python3 scripts/release.py prepare-rc
 
-          found=$(jq -r '[.[] | select(startswith("semver:"))] | join(", ")' <<<"${LABELS}")
-          count=$(jq '[.[] | select(startswith("semver:"))] | length' <<<"${LABELS}")
-          valid=$(jq '[.[] | select(. == "semver:major" or . == "semver:minor" or . == "semver:patch" or . == "semver:none")] | length' <<<"${LABELS}")
-          if [ "${count}" != "1" ] || [ "${valid}" != "1" ]; then
-            echo "::error::Exactly one of semver:major, semver:minor, semver:patch, semver:none is required (found: ${found:-none})"
-            exit 1
-          fi
-          bump=${found#semver:}
-          if [ "${bump}" = "none" ]; then
-            echo "semver:none, no release"
-            exit 0
-          fi
-
-          # Reuse an RC tag for this merge, including after a partially failed run.
-          tags=$(gh api "repos/${REPO}/tags?per_page=100" --paginate --slurp | jq 'add // []')
-          next=$(jq -r --arg sha "${SHA}" '
-            [.[] | select(.commit.sha == $sha)
-             | .name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-rc\\.[0-9]+$"))]
-            | sort | first // empty' <<<"${tags}")
-          if [ -n "${next}" ]; then
-            releases=$(gh api "repos/${REPO}/releases?per_page=100" --paginate --slurp | jq 'add // []')
-            if jq -e --arg tag "${next}" 'any(.[]; .tag_name == $tag)' <<<"${releases}" >/dev/null; then
-              echo "Release ${next} already exists for ${SHA}, skipping"
-              exit 0
-            fi
-            echo "Resuming release for existing tag ${next}"
-          else
-            next=$(jq -r '.[].name' <<<"${tags}" | bash .github/scripts/next-version.sh "${bump}")
-          fi
-          echo "Bump ${bump} → ${next}"
-
-          gh release create "${next}" --repo "${REPO}" \
-            --target "${SHA}" \
-            --title "${next}" \
-            --generate-notes \
-            --prerelease
-          echo "### Released ${next} (${bump})" >> "${GITHUB_STEP_SUMMARY}"
+  image:
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
