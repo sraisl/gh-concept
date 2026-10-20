@@ -43,6 +43,10 @@
           {
             "context": "test",
             "integration_id": 15368
+          },
+          {
+            "context": "semver-label",
+            "integration_id": 15368
           }
         ]
       }
