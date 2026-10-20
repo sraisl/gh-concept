@@ -9,8 +9,9 @@ The app itself is a tiny Go HTTP service (`/healthz`, `/hello?name=`).
 
 ```
 push to main ──► promote-to-stage.yml
-                   ├─ creates branch promote/<short-sha> at that commit
-                   └─ opens PR  promote/<short-sha> → stage  (+ semver:* label of the source PR)
+                   ├─ moves branch promote/stage to the new main commit
+                   └─ opens/updates the single PR  promote/stage → stage
+                      (+ highest semver:* label of the included source PRs)
                                    │
                                    ├─ ci.yml          (job: test)          go vet + go test
                                    ├─ sast.yml        (job: polyscan)      semgrep, gosec, gitleaks, zizmor
@@ -20,11 +21,15 @@ push to main ──► promote-to-stage.yml
                                  version.yml  → tag + prerelease vX.Y.Z-rc.N
 ```
 
-- One PR per commit pushed to `main` (per push, the head commit is promoted).
-- Skipped if `stage` already contains the commit; re-runs don't create duplicate PRs.
+- There is at most **one open promotion PR**. Each push to `main` force-moves
+  `promote/stage` to the new commit, so checks re-run on the latest state and the
+  PR body lists all included source PRs.
+- After the PR is merged, the next push to `main` opens a new one.
+- Skipped if `stage` already contains the commit.
 - If `stage` doesn't exist yet, the workflow creates it from `main`.
-- Older open promote PRs are subsets of newer ones; once a newer one is merged they
-  become empty and can be closed.
+- Merge promotion PRs with a **merge commit** (enforced by the ruleset). Squash or
+  rebase would rewrite the commits, so `stage` would never contain `main`'s
+  history and already promoted PRs would show up again.
 
 ## Versioning
 
@@ -37,9 +42,12 @@ Versions are driven by PR labels, not commit messages:
 | `semver:patch` | next patch RC, e.g. `v1.4.0` → `v1.4.1-rc.1` |
 | `semver:none`  | no tag |
 
-- Put the label on your PR into `main`; `promote-to-stage.yml` copies it to the
-  promotion PR. Direct pushes to `main` have no source PR — set the label on the
-  promotion PR by hand (`semver-label` check fails until you do).
+- Put the label on your PR into `main`. `promote-to-stage.yml` sets the
+  **highest** label of all source PRs in the promotion PR
+  (`major` > `minor` > `patch` > `none`), so no bump gets lost.
+- You can raise the label on the promotion PR by hand; later pushes never lower it.
+- Direct pushes to `main` have no source PR. If no included PR has a label, set it
+  on the promotion PR by hand (`semver-label` check fails until you do).
 - The bump is applied to the last **final** release (`vX.Y.Z`, `v0.0.0` if none).
   If an open RC line already targets the same or a higher version, its RC number
   is incremented instead: `v1.5.0-rc.1` + `patch` → `v1.5.0-rc.2`, + `major` → `v2.0.0-rc.1`.
@@ -77,7 +85,7 @@ gh label create semver:none  --color CCCCCC --description "No release"
 
 ### 3. Ruleset for `stage`
 
-Protects `stage` (PR required, no force-push/deletion):
+Protects `stage` (PR required, merge commits only, no force-push/deletion):
 
 ```sh
 gh api repos/sraisl/gh-concept/rulesets --method POST --input - <<'JSON'
@@ -94,7 +102,8 @@ gh api repos/sraisl/gh-concept/rulesets --method POST --input - <<'JSON'
         "dismiss_stale_reviews_on_push": false,
         "require_code_owner_review": false,
         "require_last_push_approval": false,
-        "required_review_thread_resolution": false } }
+        "required_review_thread_resolution": false,
+        "allowed_merge_methods": ["merge"] } }
   ]
 }
 JSON
