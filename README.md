@@ -83,51 +83,28 @@ gh label create semver:patch --color 0E8A16 --description "Fix → next patch RC
 gh label create semver:none  --color CCCCCC --description "No release"
 ```
 
-### 3. Ruleset for `stage`
+### 3. Solo branch protection
 
-Protects `stage` (PR required, merge commits only, no force-push/deletion):
+Both `main` and `stage` require pull requests, merge commits and passing `test`
+and `polyscan` checks from GitHub Actions. `stage` additionally requires
+`semver-label`. Strict up-to-date enforcement is disabled so the rolling
+promotion branch can continue pointing at the exact `main` commit without merging
+`stage` back into it. Direct pushes, force-pushes and branch deletion are blocked,
+with no bypass actors. No human or code-owner approval is required.
 
-```sh
-gh api repos/sraisl/gh-concept/rulesets --method POST --input - <<'JSON'
-{
-  "name": "stage",
-  "target": "branch",
-  "enforcement": "active",
-  "conditions": { "ref_name": { "include": ["refs/heads/stage"], "exclude": [] } },
-  "rules": [
-    { "type": "deletion" },
-    { "type": "non_fast_forward" },
-    { "type": "pull_request", "parameters": {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": false,
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": false,
-        "allowed_merge_methods": ["merge"] } }
-  ]
-}
-JSON
-```
+The definitions are in [`.github/rulesets/main.json`](.github/rulesets/main.json)
+and [`.github/rulesets/stage.json`](.github/rulesets/stage.json). Apply each with
+`gh api repos/sraisl/gh-concept/rulesets --method POST --input <file>` for a new
+ruleset, or `gh api repos/sraisl/gh-concept/rulesets/<id> --method PUT --input <file>`
+to update an existing one. Read existing rules first to preserve any additional
+settings. Deploy the SAST workflow with its `main` and `stage` triggers before
+requiring the scan for existing PRs into `main`.
 
-### 4. Make SAST scan, tests and label check required (later)
-
-Appends a `required_status_checks` rule to the existing `stage` ruleset (a `PUT`
-replaces the whole ruleset, so the current rules are read first):
-
-```sh
-id=$(gh api repos/sraisl/gh-concept/rulesets --jq '.[] | select(.name=="stage") | .id')
-gh api repos/sraisl/gh-concept/rulesets/$id \
-  | jq '{name, target, enforcement, conditions, rules: (.rules + [{
-      type: "required_status_checks",
-      parameters: {
-        strict_required_status_checks_policy: false,
-        required_status_checks: [{context: "polyscan"}, {context: "test"}, {context: "semver-label"}]
-      }}])}' \
-  | gh api repos/sraisl/gh-concept/rulesets/$id --method PUT --input -
-```
-
-Optional: a similar ruleset on `main` requiring PRs ensures every commit has a
-source PR whose `semver:*` label can be carried over.
+This solo setup prevents merging failed or missing checks. It does not make
+workflow policy tamper-proof: a PR can modify its own workflows, and the repository
+administrator can change the rules. Review workflow and release-script changes
+explicitly before merging. Independent enforcement would require a policy
+controlled outside the change being checked.
 
 ## Local
 
