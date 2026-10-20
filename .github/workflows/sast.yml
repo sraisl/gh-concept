@@ -1,0 +1,26 @@
+name: sast
+
+# SAST gate for promotion PRs into stage. The job name "polyscan" is the
+# check name to mark as required in the stage ruleset (see README).
+
+on:
+  pull_request:
+    branches: [stage]
+
+permissions:
+  contents: read
+
+jobs:
+  polyscan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sraisl/polyscan-action@dc8a1ea115d2dec570301f18ec929350a5b41145 # v16.1.0
+        with:
+          engines: semgrep,gosec,gitleaks,zizmor
+          gate: "true"
+          max-critical: "0"
+          max-high: "0"
+          sarif: "true"
