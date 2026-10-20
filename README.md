@@ -41,7 +41,7 @@ push to main ──► promote-to-stage.yml
 1. Create a feature branch and open a PR into `main`. Add exactly one supported
    `semver:*` label before merging, including `semver:none` for changes that
    should not produce a release.
-2. Wait for the required `test` and `polyscan` checks and merge the source PR.
+2. Wait for the required `test`, `polyscan` and `semver-label` checks and merge the source PR.
    These checks run on PRs into both `main` and `stage`.
 3. Wait for `promote-to-stage.yml` to create or update the rolling promotion PR.
    Review the included changes and its semver label; newer merges into `main`
@@ -68,13 +68,13 @@ Versions are driven by PR labels, not commit messages:
   **highest** label of all source PRs in the promotion PR
   (`major` > `minor` > `patch` > `none`).
 - You can raise the label on the promotion PR by hand; later pushes never lower it.
-- The stage label check and the release workflow require exactly one of the
+- The label check on both branches and the release workflow require exactly one of the
   four labels above. Unknown labels such as `semver:banana`, multiple semver
   labels and missing labels fail validation.
-- Source PR labels are a convention, not a required check on `main`. An unlabeled
-  source PR is ignored when determining the highest bump; another PR's label
-  can therefore hide missing classification. Review every included PR. If no
-  included PR has a label, set one on the promotion PR before merging.
+- Source PRs into `main` must pass `semver-label` before merging, including
+  documentation-only PRs (`semver:none`). Historical source PRs merged before
+  this requirement may still be unlabeled and are ignored when determining the
+  highest bump. If no included PR has a label, set one on the promotion PR.
 - Direct pushes to `main` are blocked by the solo rulesets. Historical commits
   without a source PR have no label to carry over.
 - The bump is applied to the last **final** release (`vX.Y.Z`, `v0.0.0` if none).
@@ -125,9 +125,9 @@ gh label create semver:none  --color CCCCCC --description "No release"
 
 ### 3. Solo branch protection
 
-Both `main` and `stage` require pull requests, merge commits and passing `test`
-and `polyscan` checks from GitHub Actions. `stage` additionally requires
-`semver-label`. Strict up-to-date enforcement is disabled so the rolling
+Both `main` and `stage` require pull requests, merge commits and passing `test`,
+`polyscan` and `semver-label` checks from GitHub Actions.
+Strict up-to-date enforcement is disabled so the rolling
 promotion branch can continue pointing at the exact `main` commit without merging
 `stage` back into it. Direct pushes, force-pushes and branch deletion are blocked,
 with no bypass actors. No human or code-owner approval is required.
@@ -165,7 +165,7 @@ gh run rerun <run-id> --repo sraisl/gh-concept --failed
   with the exact name configured in the ruleset. Do not remove required checks
   just to unblock a merge.
 - **Label check failed:** remove unsupported or duplicate semver labels and set
-  exactly one supported label. Label changes rerun the stage label check.
+  exactly one supported label. Label changes rerun the label check on either branch.
 - **Release failed after merge:** fix the underlying token/API problem and rerun
   the failed `version` job. An existing RC tag for the same merge commit is
   reused; if its release already exists, the job exits successfully. A tag
