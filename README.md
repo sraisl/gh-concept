@@ -21,10 +21,10 @@ push to main ──► promote-to-stage.yml
                                    └─ label-check.yml (job: semver-label)  exactly one semver:* label
                                    │
                                    ▼ merge
-                                 version.yml  → tag + prerelease vX.Y.Z-rc.N
+                                 version.yml  → tag + draft vX.Y.Z-rc.N
                                                      │
                                                      ▼
-                                 image.yml → build + test + GHCR image :vX.Y.Z-rc.N
+                                 image.yml → build + test + GHCR image → publish prerelease
 ```
 
 - There is at most **one open promotion PR**. Each push to `main` force-moves
@@ -61,10 +61,12 @@ validation remains a PR check because branch pushes have no PR labels.
 4. Merge the promotion PR only after `test`, `polyscan` and `semver-label` pass.
    Keep `promote/stage` managed by the workflow; do not merge `stage` back into
    it or add manual commits.
-5. Check the `version` workflow and the resulting prerelease. The RC tag must
-   resolve to the promotion PR's merge commit, not merely its head commit.
-   Check the `image` workflow as well: it publishes the tested image and records
-   its digest in the run summary. `semver:none` intentionally skips publication.
+5. Check the `version` run, including its reusable `image` job. The RC tag must
+   resolve to the promotion PR's merge commit. The release stays a draft until
+   the container is tested, pushed and verified. The published prerelease includes
+   its digest and a `release.json` asset. `semver:none` skips the entire release.
+6. Once an RC has been accepted, run `final-release.yml` manually on `main` to
+   promote that exact RC to its final version without rebuilding the image.
 
 ## Versioning
 
@@ -93,13 +95,16 @@ Versions are driven by PR labels, not commit messages:
 - The bump is applied to the last **final** release (`vX.Y.Z`, `v0.0.0` if none).
   If an open RC line already targets the same or a higher version, its RC number
   is incremented instead: `v1.5.0-rc.1` + `patch` → `v1.5.0-rc.2`, + `major` → `v2.0.0-rc.1`.
-- Each RC is published as a GitHub prerelease with generated notes. Final
-  releases (`vX.Y.Z`) and production promotion are not automated here.
-- Version calculation considers all matching repository tags, not just tags
-  reachable from `stage`. Keep experimental tags outside the `vX.Y.Z` and
+- Each RC starts as a draft and becomes a prerelease only after image verification.
+  Final releases (`vX.Y.Z`) are created by the manual final-promotion workflow;
+  deployment to production is not automated here.
+- RC version calculation considers matching repository tags, not just tags
+  reachable from `stage`. Final baselines must also have a published final release;
+  an unfinished final draft does not advance the baseline. Keep experimental tags outside the `vX.Y.Z` and
   `vX.Y.Z-rc.N` namespaces. No tag-protection rules are supplied here.
 - Logic: [`.github/scripts/next-version.sh`](.github/scripts/next-version.sh)
-  (`gh api repos/sraisl/gh-concept/tags --paginate --jq '.[].name' | bash .github/scripts/next-version.sh minor`).
+  computes the version from its input tags. [scripts/release.py](scripts/release.py)
+  filters the final baselines, manages drafts and coordinates final publication.
 
 ## Setup
 
@@ -112,8 +117,9 @@ Replace `sraisl/gh-concept` in commands and token repository access when forking
 
 PRs opened with the default `GITHUB_TOKEN` do **not** trigger `pull_request`
 workflows, so required checks would never run. `promote-to-stage.yml` therefore
-uses a fine-grained personal access token. `version.yml` uses it as well, so that
-RC tags and releases can trigger follow-up workflows (e.g. a build on tag push):
+uses a fine-grained personal access token. Release and image workflows use
+`GITHUB_TOKEN` instead: the version workflow calls the image workflow directly,
+so release readiness does not depend on tag/release events spawning other runs:
 
 1. <https://github.com/settings/personal-access-tokens/new>
 2. Repository access: *Only select repositories* → `sraisl/gh-concept`
@@ -181,16 +187,19 @@ gh run rerun <run-id> --repo sraisl/gh-concept --failed
   exactly one supported label. Label changes rerun the label check on either branch.
 - **Release failed after merge:** fix the underlying token/API problem and rerun
   the failed `version` job. An existing RC tag for the same merge commit is
-  reused; if its release already exists, the job exits successfully. A tag
-  without a release is reused to resume publication. Missing or invalid labels
+  reused along with its draft. The image job is called again to resume verification
+  and publication; an already published release is checked against `release.json`.
+  A tag without a release is reused to recreate the draft. Missing or invalid labels
   fail; `semver:none` is an intentional successful skip. Changed PR labels do not
   rewrite the original run's event payload.
-- **Image publication failed:** rerun the failed `image` job. The Git tag and RC
+- **Image publication failed:** rerun the failed jobs in the `version` run, or
+  manually run `image.yml` for the RC tag. The Git tag and RC
   version stay unchanged. If the push already succeeded, the job verifies the
   existing image's commit/version labels and keeps its digest instead of
   rebuilding. Authentication and registry failures fail the job; they are not
   interpreted as missing images. An existing tag with inconsistent labels fails
-  rather than being overwritten.
+  rather than being overwritten. The release remains a draft until all checks,
+  the metadata upload and final publication succeed. Do not publish it manually.
 
 Release jobs run one at a time. `queue: max` permits up to 100 pending runs;
 additional runs are canceled. Queue order is based on when runs start waiting,
@@ -251,11 +260,11 @@ does not disable any lint rules.
 
 ## RC container publication
 
-[`.github/workflows/image.yml`](.github/workflows/image.yml) runs on RC tag
-pushes and published prereleases. The `release` trigger also covers tags created
-as part of `gh release create`. Both triggers share a per-tag concurrency group;
-the second run verifies and reuses the image if the first already published it.
-The release workflow continues using `PROMOTE_TOKEN` so downstream events fire.
+[`.github/workflows/version.yml`](.github/workflows/version.yml) creates an RC tag
+and draft, then calls [image.yml](.github/workflows/image.yml) as a reusable
+workflow. Tag pushes and release events do not trigger image builds. Direct
+workflow calls avoid duplicate runs and ensure the draft exists before the image
+is built. The image workflow can also be run manually for recovery.
 
 The image workflow checks out the exact tag, validates the RC version and
 requires its commit to be in `stage` history. It builds a Linux/amd64 image,
@@ -265,6 +274,7 @@ version. Nothing is pushed on feature or PR test builds. There is no `latest`
 alias and no automatic final-version image build.
 
 GHCR authentication uses the workflow's `GITHUB_TOKEN` with `packages: write`;
+`contents: write` permits attaching metadata and publishing the verified draft;
 no additional package secret is needed. New packages default to private. If a
 package already exists, grant this repository Actions access in its package
 settings. See [GitHub's GHCR documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
@@ -273,14 +283,16 @@ For manual recovery after this workflow is merged to `main`, use an existing
 RC tag containing this workflow and its scripts:
 
 ```sh
-gh workflow run image.yml --repo sraisl/gh-concept -f tag=v0.1.0-rc.5
+gh workflow run image.yml --repo sraisl/gh-concept -f tag=v0.1.0-rc.6
 ```
 
 Use the digest reference from the successful run's summary to deploy exactly
 the tested bits, for example `ghcr.io/sraisl/gh-concept@sha256:<digest>`.
-A successful GitHub prerelease alone does not mean the image build succeeded;
-verify the `image` workflow separately. Production promotion should reuse this
-digest; no production deployment or final-version retagging is implemented.
+New prereleases are published only after image verification and after uploading
+`release.json`. That asset records version, commit, image tag, digest, immutable
+image reference and workflow URL. Generated notes are grouped by semver labels
+using [`.github/release.yml`](.github/release.yml). Include migration instructions
+or known issues in the source PRs; automatic notes do not assess compatibility.
 
 The workflow refuses to overwrite an existing version tag, but GHCR tags are
 not inherently immutable: another actor with package write access can still
@@ -291,3 +303,36 @@ Publication guard tests run in CI and locally without registry credentials:
 ```sh
 python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
+
+## Final releases
+
+After testing an RC on stage, explicitly select it using the Actions UI on
+`main`, or run:
+
+```sh
+gh workflow run final-release.yml --repo sraisl/gh-concept --ref main -f rc_tag=v0.1.0-rc.6
+```
+
+This promotes `v0.1.0-rc.6` to `v0.1.0`; no version input is needed. The source
+must be a published prerelease with a `release.json` asset from the new pipeline.
+Older releases without that record cannot be promoted by this workflow. First
+publish and test a new RC containing the updated pipeline.
+
+The workflow checks the RC's Git commit, stage ancestry and recorded image digest.
+It creates a final tag on the same commit and a final release draft, then copies
+the exact image manifest to `ghcr.io/sraisl/gh-concept:v0.1.0`. No build occurs.
+Both image tags resolve to the same digest, and the image's internal version
+label intentionally retains its RC value. Only after verifying the final alias
+is the final GitHub release published and marked as latest.
+
+The final release includes `release.json`, a link to its source RC, commit and
+image references, and generated notes since the preceding final tag. The first
+final release aggregates the selected version line's published RC notes. Check
+for breaking changes, migrations and known issues before accepting the RC.
+
+RC creation and final promotion share a concurrency group. A failed promotion
+can leave a draft/tag; it does not become a published final baseline. Retry the
+same RC after fixing the cause. Existing tags are never moved; conflicting
+commits or digests fail. Published release records are verified on retries and
+are not silently edited. A newer final version prevents promoting an older line.
+There is no automatic production deployment or `latest` image alias.
