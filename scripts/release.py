@@ -48,6 +48,30 @@ def release_for(repo, tag):
     return matches[0] if matches else None
 
 
+def select_rc(repo, requested=""):
+    releases = listing(repo, "releases")
+    candidates = [item["tag_name"] for item in releases
+                  if not item["draft"] and item["prerelease"]
+                  and re.fullmatch(registry.RC_PATTERN, item["tag_name"])
+                  and any(asset["name"] == "release.json" for asset in item.get("assets", []))]
+    candidates.sort(key=lambda tag: (*version_tuple(tag.split("-rc.")[0]),
+                                    int(tag.split("-rc.")[1])), reverse=True)
+    if requested:
+        if requested not in candidates:
+            raise ValueError("Selected RC must be published and contain release.json. "
+                             "Available: " + (", ".join(candidates) or "none"))
+        return requested, candidates
+    finals = [version_tuple(item["tag_name"]) for item in releases
+              if not item["draft"] and not item["prerelease"]
+              and re.fullmatch(registry.FINAL_PATTERN, item["tag_name"])]
+    available = [tag for tag in candidates
+                 if not finals or version_tuple(tag.split("-rc.")[0]) > max(finals)]
+    if not available:
+        raise ValueError("No unpublished final version has an eligible RC with release.json. "
+                         "Publish a new RC or specify an RC explicitly to retry a promotion.")
+    return available[0], available
+
+
 def ensure_tag(repo, tag, revision):
     try:
         ref = api(f"repos/{repo}/git/ref/tags/{tag}")["object"]
@@ -170,9 +194,12 @@ def publish_ready(repo, tag, revision, state, source_rc=None):
         manifest.write_text(json.dumps(record, indent=2) + "\n")
         command(["gh", "release", "upload", tag, str(manifest), "--repo", repo, "--clobber"])
     # Updating notes may be retried safely while the release remains a draft.
-    api(f"repos/{repo}/releases/{release['id']}", "PATCH", {"body": body})
-    api(f"repos/{repo}/releases/{release['id']}", "PATCH", {"draft": False,
-        "make_latest": "false" if source_rc is None else "true"})
+    identity = {"tag_name": tag, "target_commitish": revision, "name": tag}
+    api(f"repos/{repo}/releases/{release['id']}", "PATCH", {**identity, "body": body})
+    published = api(f"repos/{repo}/releases/{release['id']}", "PATCH", {
+        **identity, "draft": False, "make_latest": "false" if source_rc is None else "true"})
+    if published["tag_name"] != tag or published["draft"]:
+        raise ValueError("GitHub did not publish the requested tag; inspect the release before retrying")
     print(f"Published {tag}: {record['immutableImage']}")
     return record
 
@@ -183,6 +210,9 @@ def promote_final(repo, rc, revision, actor, token):
     release = release_for(repo, rc)
     if not release or release["draft"] or not release["prerelease"]:
         raise ValueError("Source RC must already be published")
+    if not any(asset["name"] == "release.json" for asset in release.get("assets", [])):
+        raise ValueError("Selected RC predates verified release metadata (release.json). "
+                         "Leave rc_tag empty to select an eligible RC automatically.")
     recorded = json.loads(command(["gh", "release", "download", rc, "--repo", repo,
                                    "--pattern", "release.json", "--output", "-"]))
     if recorded["tag"] != rc or recorded["commit"] != revision:
@@ -203,7 +233,16 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("Invalid repository")
     mode = sys.argv[1]
-    if mode == "prepare-rc":
+    if mode == "select-rc":
+        selected, candidates = select_rc(repo, os.environ.get("RC_TAG", "").strip())
+        with Path(os.environ["GITHUB_ENV"]).open("a") as env:
+            print(f"RC_TAG={selected}", file=env)
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+            print(f"### RC selection\n\nSelected: **{selected}**\n\nAvailable RCs:\n", file=summary)
+            for candidate in candidates:
+                print(f"- [{candidate}](https://github.com/{repo}/releases/tag/{candidate})", file=summary)
+        print(f"Selected {selected}; available RCs: {', '.join(candidates)}")
+    elif mode == "prepare-rc":
         tag = prepare_rc(repo, os.environ["SHA"], json.loads(os.environ["LABELS"]))
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             print(f"tag={tag}", file=output)

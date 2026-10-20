@@ -306,8 +306,24 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 
 ## Final releases
 
-After testing an RC on stage, explicitly select it using the Actions UI on
-`main`, or run:
+After testing the newest RC on stage, open **Actions → final-release → Run
+workflow**, choose **main**, leave `rc_tag` empty and start the run. No version
+lookup or copy/paste is needed. The workflow selects the highest Semver version
+and then the highest RC number among published prereleases with `release.json`.
+Drafts, old RCs without metadata, and version lines already finalized are skipped.
+
+The selection and links to available candidates appear in the run's job summary.
+Selection happens when the run starts; if you accepted a specific RC rather than
+whichever eligible RC is newest, enter its tag explicitly. GitHub's workflow
+input form does not populate a dynamic list of releases.
+
+Start automatic selection from the CLI:
+
+```sh
+gh workflow run final-release.yml --repo sraisl/gh-concept --ref main
+```
+
+Or explicitly select an RC, including when retrying a completed promotion:
 
 ```sh
 gh workflow run final-release.yml --repo sraisl/gh-concept --ref main -f rc_tag=v0.1.0-rc.6
