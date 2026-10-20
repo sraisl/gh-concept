@@ -1,6 +1,6 @@
 # GitHub-concept
 
-*Demo* for a **main → stage** promotion flow on GitHub Actions, gated by a SAST scan
+Demo for a **main → stage** promotion flow on GitHub Actions, gated by a SAST scan
 with [`sraisl/polyscan-action`](https://github.com/sraisl/polyscan-action).
 
 The app itself is a tiny Go HTTP service (`/healthz`, `/hello?name=`).
