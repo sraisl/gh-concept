@@ -1,8 +1,12 @@
 name: promote-to-stage
 
-# Opens one PR per commit pushed to main: promote/<short-sha> → stage.
-# Uses a PAT (PROMOTE_TOKEN) instead of GITHUB_TOKEN, because PRs created with
-# GITHUB_TOKEN do not trigger pull_request workflows (and thus no required checks).
+# Keeps a single rolling PR promote/stage → stage in sync with main.
+# Every push to main moves promote/stage to the new commit and updates the PR
+# (title, body, semver label). The label is the highest semver:* label of all
+# source PRs merged into main since the last promotion.
+#
+# Uses a PAT (PROMOTE_TOKEN) instead of GITHUB_TOKEN, because PRs and pushes made
+# with GITHUB_TOKEN do not trigger pull_request workflows (and thus no required checks).
 
 on:
   push:
@@ -11,22 +15,21 @@ on:
 permissions: {}
 
 concurrency:
-  group: promote-${{ github.sha }}
+  group: promote-to-stage
   cancel-in-progress: false
 
 jobs:
-  open-pr:
+  sync-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Create promote branch and PR
+      - name: Update rolling promotion PR
         env:
           GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           SERVER_URL: ${{ github.server_url }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
           BASE: stage
+          PROMOTE_BRANCH: promote/stage
         run: |
           set -euo pipefail
 
@@ -36,47 +39,73 @@ jobs:
           fi
 
           short="${SHA::7}"
-          branch="promote/${short}"
 
           # Create stage from main on first run.
-          if ! gh api "repos/${REPO}/branches/${BASE}" --silent 2>/dev/null; then
-            echo "Branch ${BASE} missing, creating it at ${SHA}"
+          if ! gh api "repos/${REPO}/git/ref/heads/${BASE}" --silent 2>/dev/null; then
+            echo "Branch ${BASE} missing, creating it at ${short}"
             gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${BASE}" -f sha="${SHA}" --silent
             exit 0
           fi
 
-          # Nothing to promote if stage already contains this commit.
-          ahead=$(gh api "repos/${REPO}/compare/${BASE}...${SHA}" --jq .ahead_by)
-          if [ "${ahead}" = "0" ]; then
+          compare=$(gh api "repos/${REPO}/compare/${BASE}...${SHA}")
+          if [ "$(jq .ahead_by <<<"${compare}")" = "0" ]; then
             echo "${BASE} already contains ${short}, skipping"
             exit 0
           fi
 
-          if ! gh api "repos/${REPO}/branches/${branch}" --silent 2>/dev/null; then
-            gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${branch}" -f sha="${SHA}" --silent
+          # Move the rolling head branch to the new main commit.
+          if gh api "repos/${REPO}/git/ref/heads/${PROMOTE_BRANCH}" --silent 2>/dev/null; then
+            gh api --method PATCH "repos/${REPO}/git/refs/heads/${PROMOTE_BRANCH}" \
+              -f sha="${SHA}" -F force=true --silent
+          else
+            gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${PROMOTE_BRANCH}" -f sha="${SHA}" --silent
           fi
 
-          existing=$(gh pr list --repo "${REPO}" --base "${BASE}" --head "${branch}" --state open --json number --jq '.[0].number // empty')
-          if [ -n "${existing}" ]; then
-            echo "PR #${existing} already open for ${branch}"
+          # Source PRs merged into main that are not yet in stage.
+          prs=$(jq -r '.commits[].sha' <<<"${compare}" | while read -r commit; do
+            gh api "repos/${REPO}/commits/${commit}/pulls" \
+              --jq '.[] | select(.base.ref == "main" and .merged_at != null)
+                    | {number, title, labels: [.labels[].name | select(startswith("semver:"))]}'
+          done | jq -s 'unique_by(.number)')
+
+          existing=$(gh pr list --repo "${REPO}" --base "${BASE}" --head "${PROMOTE_BRANCH}" \
+            --state open --json number,labels --jq '.[0] // {}')
+          number=$(jq -r '.number // empty' <<<"${existing}")
+          current=$(jq -c '[.labels[]?.name | select(startswith("semver:"))]' <<<"${existing}")
+
+          # Highest label wins; a label set by hand on the PR is never lowered.
+          label=$(jq -rn --argjson prs "${prs}" --argjson current "${current}" '
+            {"semver:none": 0, "semver:patch": 1, "semver:minor": 2, "semver:major": 3} as $rank
+            | ([$prs[].labels[]] + $current | unique)
+            | max_by($rank[.]) // empty')
+
+          commits=$(jq '.commits | length' <<<"${compare}")
+          body=$(jq -rn --argjson prs "${prs}" \
+            --arg base "${BASE}" --arg url "${SERVER_URL}/${REPO}/compare/${BASE}...${SHA}" \
+            --arg commits "${commits}" --arg short "${short}" '
+            "Rolling promotion of `main` (`\($short)`) to `\($base)`. Updated on every push to `main`.\n\n"
+            + "**Included PRs**\n\n"
+            + (if ($prs | length) == 0 then "_none – direct pushes only_\n"
+               else ($prs | map("- #\(.number) \(.title)" + (if (.labels | length) > 0 then " `\(.labels | join(", "))`" else "" end)) | join("\n")) + "\n"
+               end)
+            + "\n[\($commits) commit(s)](\($url))\n"')
+          if [ -z "${label}" ]; then
+            body+=$'\n> [!IMPORTANT]\n> No `semver:*` label on any source PR. Set one before merging.\n'
+          fi
+
+          title="Promote main → ${BASE} (${short})"
+          if [ -z "${number}" ]; then
+            gh pr create --repo "${REPO}" --base "${BASE}" --head "${PROMOTE_BRANCH}" \
+              --title "${title}" --body "${body}" ${label:+--label "${label}"}
             exit 0
           fi
 
-          subject="${COMMIT_MSG%%$'\n'*}"
-          # shellcheck disable=SC2016 # backticks are Markdown, not command substitution
-          body=$(printf 'Automatic promotion of %s/%s/commit/%s to `%s`.\n\n**Author:** %s\n\n```\n%s\n```\n' \
-            "${SERVER_URL}" "${REPO}" "${SHA}" "${BASE}" "${COMMIT_AUTHOR}" "${COMMIT_MSG}")
-
-          # Carry over the semver:* label from the PR that brought this commit into main.
-          label=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
-            --jq '[.[].labels[].name | select(startswith("semver:"))][0] // empty')
-          if [ -z "${label}" ]; then
-            body+=$'\n> [!IMPORTANT]\n> No `semver:*` label found on the source PR — set one before merging.\n'
+          gh pr edit "${number}" --repo "${REPO}" --title "${title}" --body "${body}"
+          stale=$(jq -r --arg label "${label}" '[.[] | select(. != $label)] | join(",")' <<<"${current}")
+          if [ -n "${label}" ] && ! jq -e --arg label "${label}" 'index($label)' <<<"${current}" >/dev/null; then
+            gh pr edit "${number}" --repo "${REPO}" --add-label "${label}"
           fi
-
-          gh pr create --repo "${REPO}" \
-            --base "${BASE}" \
-            --head "${branch}" \
-            --title "Promote ${short}: ${subject}" \
-            --body "${body}" \
-            ${label:+--label "${label}"}
+          if [ -n "${stale}" ]; then
+            gh pr edit "${number}" --repo "${REPO}" --remove-label "${stale}"
+          fi
+          echo "Updated PR #${number} → ${short} (${label:-no label})"
