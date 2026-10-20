@@ -13,7 +13,7 @@ SHA = "a" * 40
 DIGEST = "sha256:" + "b" * 64
 STATE = {"image": f"ghcr.io/{REPO}:{RC}", "digest": DIGEST, "exists": "true"}
 DRAFT = {"id": 123, "tag_name": RC, "body": "## Changes\n- Feature #14",
-         "draft": True, "prerelease": True}
+         "draft": True, "prerelease": True, "assets": [{"name": "release.json"}]}
 
 
 class ReleaseTests(unittest.TestCase):
@@ -69,6 +69,9 @@ class ReleaseTests(unittest.TestCase):
             order.append("upload")
         def api(path, method="GET", data=None, **kwargs):
             order.append("publish" if data and data.get("draft") is False else "notes")
+            self.assertEqual(data["tag_name"], RC)
+            self.assertEqual(data["target_commitish"], SHA)
+            return {"tag_name": RC, "draft": False}
         with patch.object(release, "release_for", return_value=DRAFT), \
                 patch.object(release, "command", side_effect=upload), \
                 patch.object(release, "api", side_effect=api):
@@ -96,12 +99,34 @@ class ReleaseTests(unittest.TestCase):
         draft = {**DRAFT, "body": DRAFT["body"] + "\n" + release.MARKER + "\nold metadata"}
         with patch.object(release, "release_for", return_value=draft), \
                 patch.object(release, "command", return_value=""), \
-                patch.object(release, "api") as api:
+                patch.object(release, "api", return_value={"tag_name": RC, "draft": False}) as api:
             release.publish_ready(REPO, RC, SHA, STATE)
             body = api.call_args_list[0].args[2]["body"]
             self.assertEqual(body.count(release.MARKER), 1)
             self.assertIn("Feature #14", body)
             self.assertNotIn("old metadata", body)
+
+    def test_untagged_publication_is_not_reported_as_success(self):
+        with patch.object(release, "release_for", return_value=DRAFT), \
+                patch.object(release, "command", return_value=""), \
+                patch.object(release, "api", return_value={"tag_name": "untagged-123", "draft": False}):
+            with self.assertRaisesRegex(ValueError, "requested tag"):
+                release.publish_ready(REPO, RC, SHA, STATE)
+
+    def test_final_publication_keeps_final_tag_and_records_source_rc(self):
+        final = "v0.1.0"
+        draft = {**DRAFT, "tag_name": final, "prerelease": False}
+        state = {**STATE, "image": f"ghcr.io/{REPO}:{final}"}
+        with patch.object(release, "release_for", return_value=draft), \
+                patch.object(release, "command", return_value=""), \
+                patch.object(release, "api", return_value={"tag_name": final, "draft": False}) as api:
+            record = release.publish_ready(REPO, final, SHA, state, source_rc=RC)
+            self.assertEqual(record["sourceRC"], RC)
+            self.assertEqual(record["digest"], DIGEST)
+            for call in api.call_args_list:
+                self.assertEqual(call.args[2]["tag_name"], final)
+                self.assertEqual(call.args[2]["target_commitish"], SHA)
+            self.assertEqual(api.call_args.args[2]["make_latest"], "true")
 
     def test_published_retry_only_verifies_record(self):
         previous = release.record_for(REPO, RC, SHA, STATE)
@@ -198,6 +223,13 @@ class ReleaseTests(unittest.TestCase):
                 release.promote_final(REPO, RC, SHA, "actor", "token")
             promote.assert_not_called()
 
+    def test_legacy_rc_reports_missing_metadata_before_download(self):
+        with patch.object(release, "release_for", return_value={**DRAFT, "draft": False, "assets": []}), \
+                patch.object(release, "command") as command:
+            with self.assertRaisesRegex(ValueError, "Leave rc_tag empty"):
+                release.promote_final(REPO, RC, SHA, "actor", "token")
+            command.assert_not_called()
+
     def test_final_promotes_recorded_digest_without_building(self):
         record = release.record_for(REPO, RC, SHA, STATE)
         state = {**STATE, "image": f"ghcr.io/{REPO}:v0.1.0"}
@@ -224,6 +256,60 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.promote_final(REPO, RC, SHA, "actor", "token")
             publish.assert_not_called()
+
+
+class RcSelectionTests(unittest.TestCase):
+    @staticmethod
+    def candidate(tag, **overrides):
+        return {**DRAFT, "tag_name": tag, "draft": False, **overrides}
+
+    def select(self, releases, requested=""):
+        with patch.object(release, "listing", return_value=releases):
+            return release.select_rc(REPO, requested)
+
+    def test_automatic_selection_sorts_rc_numbers_numerically(self):
+        selected, candidates = self.select([self.candidate(tag) for tag in
+                                            ["v0.1.0-rc.9", "v0.1.0-rc.10", "v0.1.0-rc.6"]])
+        self.assertEqual(selected, "v0.1.0-rc.10")
+        self.assertEqual(candidates[0], selected)
+
+    def test_version_line_takes_precedence_over_rc_count(self):
+        selected, _ = self.select([self.candidate(tag) for tag in
+                                  ["v0.9.0-rc.99", "v0.10.0-rc.1"]])
+        self.assertEqual(selected, "v0.10.0-rc.1")
+
+    def test_drafts_legacy_and_non_rc_releases_are_excluded(self):
+        selected, candidates = self.select([
+            self.candidate("v9.0.0-rc.1", draft=True),
+            self.candidate("v8.0.0-rc.1", assets=[]),
+            self.candidate("v7.0.0-rc.1", prerelease=False),
+            self.candidate("untagged-123"), self.candidate(RC)])
+        self.assertEqual(selected, RC)
+        self.assertEqual(candidates, [RC])
+
+    def test_published_final_lines_are_skipped_automatically(self):
+        selected, candidates = self.select([
+            self.candidate("v0.1.0-rc.6"), self.candidate("v0.1.1-rc.1"),
+            self.candidate("v0.1.0", prerelease=False)])
+        self.assertEqual(selected, "v0.1.1-rc.1")
+        self.assertEqual(candidates, [selected])
+
+    def test_explicit_rc_can_be_selected_for_retry(self):
+        selected, _ = self.select([
+            self.candidate(RC), self.candidate("v0.1.0", prerelease=False)], requested=RC)
+        self.assertEqual(selected, RC)
+
+    def test_unknown_or_legacy_explicit_rc_lists_eligible_alternatives(self):
+        with self.assertRaisesRegex(ValueError, "Available: " + RC):
+            self.select([self.candidate(RC)], requested="v0.1.0-rc.5")
+
+    def test_no_candidates_requires_a_new_rc(self):
+        with self.assertRaisesRegex(ValueError, "Publish a new RC"):
+            self.select([self.candidate(RC, assets=[])])
+
+    def test_finalized_only_line_is_not_silently_promoted_again(self):
+        with self.assertRaisesRegex(ValueError, "specify an RC explicitly"):
+            self.select([self.candidate(RC), self.candidate("v0.1.0", prerelease=False)])
 
 
 if __name__ == "__main__":

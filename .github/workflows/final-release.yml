@@ -1,11 +1,13 @@
 name: final-release
+run-name: Final release from ${{ inputs.rc_tag || 'newest eligible RC' }}
 
 on:
   workflow_dispatch:
     inputs:
       rc_tag:
-        description: Published and tested RC to promote (e.g. v0.1.0-rc.6)
-        required: true
+        description: Optional RC tag; leave empty for the newest eligible published RC
+        required: false
+        default: ''
         type: string
 
 permissions: {}
@@ -23,13 +25,16 @@ jobs:
     permissions:
       contents: write
       packages: write
-    env:
-      RC_TAG: ${{ inputs.rc_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Select published RC
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_TAG: ${{ inputs.rc_tag }}
+        run: python3 scripts/release.py select-rc
       - name: Validate selected RC commit
         run: |
           set -euo pipefail
