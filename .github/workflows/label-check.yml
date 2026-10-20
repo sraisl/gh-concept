@@ -21,7 +21,8 @@ jobs:
           set -euo pipefail
           found=$(jq -r '[.[] | select(startswith("semver:"))] | join(", ")' <<<"${LABELS}")
           count=$(jq '[.[] | select(startswith("semver:"))] | length' <<<"${LABELS}")
-          if [ "${count}" != "1" ]; then
+          valid=$(jq '[.[] | select(. == "semver:major" or . == "semver:minor" or . == "semver:patch" or . == "semver:none")] | length' <<<"${LABELS}")
+          if [ "${count}" != "1" ] || [ "${valid}" != "1" ]; then
             echo "::error::Exactly one of semver:major, semver:minor, semver:patch, semver:none is required (found: ${found:-none})"
             exit 1
           fi

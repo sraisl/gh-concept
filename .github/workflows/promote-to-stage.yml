@@ -47,7 +47,9 @@ jobs:
             exit 0
           fi
 
-          compare=$(gh api "repos/${REPO}/compare/${BASE}...${SHA}")
+          # Fetch every page; an unpaginated comparison is limited to 250 commits.
+          compare=$(gh api "repos/${REPO}/compare/${BASE}...${SHA}?per_page=100" \
+            --paginate --slurp | jq '.[0] + {commits: [.[].commits[]]}')
           if [ "$(jq .ahead_by <<<"${compare}")" = "0" ]; then
             echo "${BASE} already contains ${short}, skipping"
             exit 0

@@ -13,6 +13,7 @@ permissions: {}
 concurrency:
   group: version-stage
   cancel-in-progress: false
+  queue: max
 
 jobs:
   tag:
@@ -35,13 +36,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          bump=$(jq -r '[.[] | select(startswith("semver:"))][0] // "semver:none" | sub("^semver:"; "")' <<<"${LABELS}")
+          found=$(jq -r '[.[] | select(startswith("semver:"))] | join(", ")' <<<"${LABELS}")
+          count=$(jq '[.[] | select(startswith("semver:"))] | length' <<<"${LABELS}")
+          valid=$(jq '[.[] | select(. == "semver:major" or . == "semver:minor" or . == "semver:patch" or . == "semver:none")] | length' <<<"${LABELS}")
+          if [ "${count}" != "1" ] || [ "${valid}" != "1" ]; then
+            echo "::error::Exactly one of semver:major, semver:minor, semver:patch, semver:none is required (found: ${found:-none})"
+            exit 1
+          fi
+          bump=${found#semver:}
           if [ "${bump}" = "none" ]; then
             echo "semver:none, no release"
             exit 0
           fi
 
-          next=$(gh api "repos/${REPO}/tags" --paginate --jq '.[].name' | bash .github/scripts/next-version.sh "${bump}")
+          # Reuse an RC tag for this merge, including after a partially failed run.
+          tags=$(gh api "repos/${REPO}/tags?per_page=100" --paginate --slurp | jq 'add // []')
+          next=$(jq -r --arg sha "${SHA}" '
+            [.[] | select(.commit.sha == $sha)
+             | .name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-rc\\.[0-9]+$"))]
+            | sort | first // empty' <<<"${tags}")
+          if [ -n "${next}" ]; then
+            releases=$(gh api "repos/${REPO}/releases?per_page=100" --paginate --slurp | jq 'add // []')
+            if jq -e --arg tag "${next}" 'any(.[]; .tag_name == $tag)' <<<"${releases}" >/dev/null; then
+              echo "Release ${next} already exists for ${SHA}, skipping"
+              exit 0
+            fi
+            echo "Resuming release for existing tag ${next}"
+          else
+            next=$(jq -r '.[].name' <<<"${tags}" | bash .github/scripts/next-version.sh "${bump}")
+          fi
           echo "Bump ${bump} → ${next}"
 
           gh release create "${next}" --repo "${REPO}" \
