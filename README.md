@@ -38,13 +38,14 @@ push to main ──► promote-to-stage.yml
 
 ## Daily workflow
 
-CI runs `go vet` and `go test` on every branch push, including feature, fix and
-documentation branches, before a PR is opened. Pushes to `stage` and the
+CI runs `go vet`, `go test` and the SAST scan on every branch push, including
+feature, fix and documentation branches, before a PR is opened. Pushes to `stage` and the
 automation-managed `promote/stage` branch are excluded; their changes are tested
 through PRs into `stage`. PRs into `main` and `stage` additionally test the merge
 result. An open source PR can therefore have both a branch-push run and a PR run.
 New commits cancel older CI runs for the same event and ref; push and PR checks
-do not cancel each other. SAST and semver validation remain PR checks.
+do not cancel each other. SAST uses the same event/ref isolation; semver
+validation remains a PR check because branch pushes have no PR labels.
 
 1. Create a feature branch and open a PR into `main`. Add exactly one supported
    `semver:*` label before merging, including `semver:none` for changes that
