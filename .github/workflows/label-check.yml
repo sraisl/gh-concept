@@ -1,0 +1,29 @@
+name: label-check
+
+# Promotion PRs into stage need exactly one semver:* label; version.yml uses
+# it to compute the release-candidate tag on merge.
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled, unlabeled, synchronize]
+    branches: [stage]
+
+permissions: {}
+
+jobs:
+  semver-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require exactly one semver label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          found=$(jq -r '[.[] | select(startswith("semver:"))] | join(", ")' <<<"${LABELS}")
+          count=$(jq '[.[] | select(startswith("semver:"))] | length' <<<"${LABELS}")
+          valid=$(jq '[.[] | select(. == "semver:major" or . == "semver:minor" or . == "semver:patch" or . == "semver:none")] | length' <<<"${LABELS}")
+          if [ "${count}" != "1" ] || [ "${valid}" != "1" ]; then
+            echo "::error::Exactly one of semver:major, semver:minor, semver:patch, semver:none is required (found: ${found:-none})"
+            exit 1
+          fi
+          echo "Label: ${found}"
