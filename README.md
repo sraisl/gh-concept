@@ -53,8 +53,9 @@ Versions are driven by PR labels, not commit messages:
 ### 1. `PROMOTE_TOKEN` secret
 
 PRs opened with the default `GITHUB_TOKEN` do **not** trigger `pull_request`
-workflows, so required checks would never run. The workflow therefore uses a
-fine-grained personal access token:
+workflows, so required checks would never run. `promote-to-stage.yml` therefore
+uses a fine-grained personal access token. `version.yml` uses it as well, so that
+RC tags and releases can trigger follow-up workflows (e.g. a build on tag push):
 
 1. <https://github.com/settings/personal-access-tokens/new>
 2. Repository access: *Only select repositories* → `sraisl/gh-concept`
@@ -65,7 +66,16 @@ fine-grained personal access token:
    gh secret set PROMOTE_TOKEN --repo sraisl/gh-concept
    ```
 
-### 2. Ruleset for `stage`
+### 2. Labels
+
+```sh
+gh label create semver:major --color B60205 --description "Breaking change → next major RC"
+gh label create semver:minor --color FBCA04 --description "New feature → next minor RC"
+gh label create semver:patch --color 0E8A16 --description "Fix → next patch RC"
+gh label create semver:none  --color CCCCCC --description "No release"
+```
+
+### 3. Ruleset for `stage`
 
 Protects `stage` (PR required, no force-push/deletion):
 
@@ -90,20 +100,25 @@ gh api repos/sraisl/gh-concept/rulesets --method POST --input - <<'JSON'
 JSON
 ```
 
-### 3. Make the SAST scan a required check (later)
+### 4. Make SAST scan, tests and label check required (later)
 
-Add a `required_status_checks` rule to the ruleset (get the id via
-`gh api repos/sraisl/gh-concept/rulesets`):
-
-```json
-{ "type": "required_status_checks", "parameters": {
-    "strict_required_status_checks_policy": false,
-    "required_status_checks": [ { "context": "polyscan" }, { "context": "test" }, { "context": "semver-label" } ] } }
-```
+Appends a `required_status_checks` rule to the existing `stage` ruleset (a `PUT`
+replaces the whole ruleset, so the current rules are read first):
 
 ```sh
-gh api repos/sraisl/gh-concept/rulesets/<id> --method PUT --input ruleset.json
+id=$(gh api repos/sraisl/gh-concept/rulesets --jq '.[] | select(.name=="stage") | .id')
+gh api repos/sraisl/gh-concept/rulesets/$id \
+  | jq '{name, target, enforcement, conditions, rules: (.rules + [{
+      type: "required_status_checks",
+      parameters: {
+        strict_required_status_checks_policy: false,
+        required_status_checks: [{context: "polyscan"}, {context: "test"}, {context: "semver-label"}]
+      }}])}' \
+  | gh api repos/sraisl/gh-concept/rulesets/$id --method PUT --input -
 ```
+
+Optional: a similar ruleset on `main` requiring PRs ensures every commit has a
+source PR whose `semver:*` label can be carried over.
 
 ## Local
 
