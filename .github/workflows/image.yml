@@ -1,10 +1,11 @@
 name: image
 
 on:
-  push:
-    tags: ['v*.*.*-rc.*']
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -15,24 +16,23 @@ on:
 permissions: {}
 
 concurrency:
-  group: image-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+  group: image-${{ inputs.tag }}
   cancel-in-progress: false
   queue: max
 
 jobs:
   publish:
-    if: github.event_name != 'release' || github.event.release.prerelease
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
-      TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+          ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
       - name: Validate release commit
@@ -84,6 +84,11 @@ jobs:
             echo "Commit: \`${REVISION}\`"
             echo "Digest reference: \`${IMAGE%:*}@${DIGEST}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Publish ready RC release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/release.py complete-rc
       - name: Log out of GHCR
         if: always()
         run: docker logout ghcr.io
