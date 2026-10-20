@@ -67,8 +67,16 @@ jobs:
           body=$(printf 'Automatic promotion of %s/%s/commit/%s to `%s`.\n\n**Author:** %s\n\n```\n%s\n```\n' \
             "${SERVER_URL}" "${REPO}" "${SHA}" "${BASE}" "${COMMIT_AUTHOR}" "${COMMIT_MSG}")
 
+          # Carry over the semver:* label from the PR that brought this commit into main.
+          label=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+            --jq '[.[].labels[].name | select(startswith("semver:"))][0] // empty')
+          if [ -z "${label}" ]; then
+            body+=$'\n> [!IMPORTANT]\n> No `semver:*` label found on the source PR — set one before merging.\n'
+          fi
+
           gh pr create --repo "${REPO}" \
             --base "${BASE}" \
             --head "${branch}" \
             --title "Promote ${short}: ${subject}" \
-            --body "${body}"
+            --body "${body}" \
+            ${label:+--label "${label}"}
