@@ -1,14 +1,20 @@
 name: sast
 
-# SAST gate for PRs into main and stage. The job name "polyscan" is the
+# SAST for feature pushes and PRs. The job name "polyscan" is the
 # required check name in both branch rulesets (see README).
 
 on:
+  push:
+    branches-ignore: [stage, promote/stage]
   pull_request:
     branches: [main, stage]
 
 permissions:
   contents: read
+
+concurrency:
+  group: sast-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   polyscan:
