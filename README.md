@@ -4,9 +4,9 @@ Demo for a **main → stage** promotion flow on GitHub Actions, gated by a SAST 
 with [`sraisl/polyscan-action`](https://github.com/sraisl/polyscan-action).
 
 The app itself is a tiny Go HTTP service (`/healthz`, `/hello?name=`).
-`stage` is a Git branch. CI builds and tests a container image but does not push
-it to a registry or deploy a staging environment. A release currently contains
-a source tag and generated release notes.
+`stage` is a Git branch. CI builds and tests a container image; RC releases
+publish their tested image to GHCR with the same version as the Git tag.
+Deploying a staging environment is a separate step and is not automated here.
 
 ## Flow
 
@@ -22,6 +22,9 @@ push to main ──► promote-to-stage.yml
                                    │
                                    ▼ merge
                                  version.yml  → tag + prerelease vX.Y.Z-rc.N
+                                                     │
+                                                     ▼
+                                 image.yml → build + test + GHCR image :vX.Y.Z-rc.N
 ```
 
 - There is at most **one open promotion PR**. Each push to `main` force-moves
@@ -60,7 +63,8 @@ validation remains a PR check because branch pushes have no PR labels.
    it or add manual commits.
 5. Check the `version` workflow and the resulting prerelease. The RC tag must
    resolve to the promotion PR's merge commit, not merely its head commit.
-   `semver:none` intentionally skips publication.
+   Check the `image` workflow as well: it publishes the tested image and records
+   its digest in the run summary. `semver:none` intentionally skips publication.
 
 ## Versioning
 
@@ -181,6 +185,12 @@ gh run rerun <run-id> --repo sraisl/gh-concept --failed
   without a release is reused to resume publication. Missing or invalid labels
   fail; `semver:none` is an intentional successful skip. Changed PR labels do not
   rewrite the original run's event payload.
+- **Image publication failed:** rerun the failed `image` job. The Git tag and RC
+  version stay unchanged. If the push already succeeded, the job verifies the
+  existing image's commit/version labels and keeps its digest instead of
+  rebuilding. Authentication and registry failures fail the job; they are not
+  interpreted as missing images. An existing tag with inconsistent labels fails
+  rather than being overwritten.
 
 Release jobs run one at a time. `queue: max` permits up to 100 pending runs;
 additional runs are canceled. Queue order is based on when runs start waiting,
@@ -238,3 +248,46 @@ read-only filesystem and dropped capabilities, checks both the default port and
 the `PORT` override, and removes its test containers. The local test image is
 retained. Hadolint runs as part of the existing Polyscan check; the Dockerfile
 does not disable any lint rules.
+
+## RC container publication
+
+[`.github/workflows/image.yml`](.github/workflows/image.yml) runs on RC tag
+pushes and published prereleases. The `release` trigger also covers tags created
+as part of `gh release create`. Both triggers share a per-tag concurrency group;
+the second run verifies and reuses the image if the first already published it.
+The release workflow continues using `PROMOTE_TOKEN` so downstream events fire.
+
+The image workflow checks out the exact tag, validates the RC version and
+requires its commit to be in `stage` history. It builds a Linux/amd64 image,
+runs the container tests against that exact local image, then pushes it as
+`ghcr.io/sraisl/gh-concept:vX.Y.Z-rc.N`. OCI labels record source, commit and
+version. Nothing is pushed on feature or PR test builds. There is no `latest`
+alias and no automatic final-version image build.
+
+GHCR authentication uses the workflow's `GITHUB_TOKEN` with `packages: write`;
+no additional package secret is needed. New packages default to private. If a
+package already exists, grant this repository Actions access in its package
+settings. See [GitHub's GHCR documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+For manual recovery after this workflow is merged to `main`, use an existing
+RC tag containing this workflow and its scripts:
+
+```sh
+gh workflow run image.yml --repo sraisl/gh-concept -f tag=v0.1.0-rc.5
+```
+
+Use the digest reference from the successful run's summary to deploy exactly
+the tested bits, for example `ghcr.io/sraisl/gh-concept@sha256:<digest>`.
+A successful GitHub prerelease alone does not mean the image build succeeded;
+verify the `image` workflow separately. Production promotion should reuse this
+digest; no production deployment or final-version retagging is implemented.
+
+The workflow refuses to overwrite an existing version tag, but GHCR tags are
+not inherently immutable: another actor with package write access can still
+replace them. The workflow's concurrency lock covers only its own runs.
+
+Publication guard tests run in CI and locally without registry credentials:
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_*.py'
+```
