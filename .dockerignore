@@ -1,0 +1,9 @@
+.git
+.github
+scripts
+README.md
+Dockerfile
+.dockerignore
+*.log
+coverage*
+gh-concept
