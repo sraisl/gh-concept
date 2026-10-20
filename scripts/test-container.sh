@@ -17,7 +17,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker build --tag "${image}" .
+docker build --tag "${image}" \
+  --label "org.opencontainers.image.source=${IMAGE_SOURCE:-https://github.com/sraisl/gh-concept}" \
+  --label "org.opencontainers.image.revision=${IMAGE_REVISION:-$(git rev-parse HEAD)}" \
+  --label "org.opencontainers.image.version=${IMAGE_VERSION:-dev}" .
 test "$(docker image inspect --format '{{.Config.User}}' "${image}")" = "65532:65532"
 
 for port in 8080 9090; do
